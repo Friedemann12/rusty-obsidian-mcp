@@ -1,0 +1,7 @@
+/target
+.idea
+.vscode
+.cursor
+.env
+.agents
+skills-lock.json
