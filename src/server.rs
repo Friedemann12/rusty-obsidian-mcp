@@ -137,6 +137,18 @@ pub struct PatchFileArgs {
     pub replace_all: Option<bool>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReplaceLineArgs {
+    /// File path relative to vault root
+    pub file: String,
+    /// 1-based line number to replace
+    pub line: u32,
+    /// Expected current content of the target line
+    pub expected: String,
+    /// New content for the target line
+    pub replace: String,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct FindRelatedArgs {
     pub topic: String,
@@ -156,15 +168,41 @@ fn cli_err(e: crate::cli::CliError) -> String {
 
 fn eval_modify_js(path: &str, content: &str) -> String {
     let payload = json!({ "path": path, "content": content });
-    let encoded = payload.to_string().replace('\\', "\\\\").replace('\'', "\\'");
-    format!(r#"const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);await app.vault.modify(f,d.content);"#)
+    let encoded = payload
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
+    format!(
+        r#"(async()=>{{const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);await app.vault.modify(f,d.content);}})()"#
+    )
 }
 
 fn eval_patch_js(path: &str, find: &str, replace: &str, replace_all: bool) -> String {
     let payload = json!({ "path": path, "find": find, "replace": replace });
-    let encoded = payload.to_string().replace('\\', "\\\\").replace('\'', "\\'");
+    let encoded = payload
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
     let method = if replace_all { "replaceAll" } else { "replace" };
-    format!(r#"const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);let c=await app.vault.read(f);c=c.{method}(d.find,d.replace);await app.vault.modify(f,c);"#)
+    format!(
+        r#"(async()=>{{const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);let c=await app.vault.read(f);c=c.{method}(d.find,d.replace);await app.vault.modify(f,c);}})()"#
+    )
+}
+
+fn eval_replace_line_js(path: &str, line: u32, expected: &str, replace: &str) -> String {
+    let payload = json!({
+        "path": path,
+        "line": line,
+        "expected": expected,
+        "replace": replace
+    });
+    let encoded = payload
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
+    format!(
+        r#"(async()=>{{const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);let c=await app.vault.read(f);const lines=c.split(/\r?\n/);const idx=d.line-1;if(!Number.isInteger(d.line)||d.line<1)throw new Error('Line number must be >= 1');if(idx>=lines.length)throw new Error('Line '+d.line+' out of range (file has '+lines.length+' lines)');if(lines[idx]!==d.expected)throw new Error('Line '+d.line+' conflict: expected "'+d.expected+'" but found "'+lines[idx]+'"');lines[idx]=d.replace;const eol=c.includes('\r\n')?'\r\n':'\n';await app.vault.modify(f,lines.join(eol));}})()"#
+    )
 }
 
 fn parse_json_array_as_strings(val: &serde_json::Value) -> Vec<String> {
@@ -265,7 +303,11 @@ impl ObsidianServer {
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<FileContent>, String> {
         let file_arg = format!("file={}", args.file);
-        let result = self.cli.run_raw(&["read", &file_arg]).await.map_err(cli_err)?;
+        let result = self
+            .cli
+            .run_raw(&["read", &file_arg])
+            .await
+            .map_err(cli_err)?;
         Ok(Json(FileContent {
             path: args.file,
             content: result,
@@ -362,16 +404,31 @@ impl ObsidianServer {
         }))
     }
 
-    #[tool(name = "write_file", description = "Replace the entire content of an existing file. Read first, modify, then write back.")]
-    async fn write_file(&self, Parameters(args): Parameters<AppendPrependArgs>) -> Result<Json<FileModified>, String> {
+    #[tool(
+        name = "write_file",
+        description = "Replace the entire content of an existing file. Read first, modify, then write back."
+    )]
+    async fn write_file(
+        &self,
+        Parameters(args): Parameters<AppendPrependArgs>,
+    ) -> Result<Json<FileModified>, String> {
         let js = eval_modify_js(&args.file, &args.content);
         let code_arg = format!("code={js}");
         self.cli.run(&["eval", &code_arg]).await.map_err(cli_err)?;
-        Ok(Json(FileModified { path: args.file, message: "File updated".into() }))
+        Ok(Json(FileModified {
+            path: args.file,
+            message: "File updated".into(),
+        }))
     }
 
-    #[tool(name = "patch_file", description = "Find and replace text within a file. Set replace_all=true for all occurrences.")]
-    async fn patch_file(&self, Parameters(args): Parameters<PatchFileArgs>) -> Result<Json<PatchResult>, String> {
+    #[tool(
+        name = "patch_file",
+        description = "Find and replace text within a file. Set replace_all=true for all occurrences."
+    )]
+    async fn patch_file(
+        &self,
+        Parameters(args): Parameters<PatchFileArgs>,
+    ) -> Result<Json<PatchResult>, String> {
         let replace_all = args.replace_all.unwrap_or(false);
         let js = eval_patch_js(&args.file, &args.find, &args.replace, replace_all);
         let code_arg = format!("code={js}");
@@ -380,6 +437,23 @@ impl ObsidianServer {
             path: args.file,
             replacements: if replace_all { 0 } else { 1 },
             message: "Patch applied".into(),
+        }))
+    }
+
+    #[tool(
+        name = "replace_line",
+        description = "Replace exactly one 1-based line in a file. Fails if the current line content does not match the expected text."
+    )]
+    async fn replace_line(
+        &self,
+        Parameters(args): Parameters<ReplaceLineArgs>,
+    ) -> Result<Json<FileModified>, String> {
+        let js = eval_replace_line_js(&args.file, args.line, &args.expected, &args.replace);
+        let code_arg = format!("code={js}");
+        self.cli.run(&["eval", &code_arg]).await.map_err(cli_err)?;
+        Ok(Json(FileModified {
+            path: args.file,
+            message: format!("Line {} replaced", args.line),
         }))
     }
 
@@ -506,11 +580,7 @@ impl ObsidianServer {
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<LinkList>, String> {
         let file_arg = format!("file={}", args.file);
-        let result = self
-            .cli
-            .run(&["links", &file_arg])
-            .await
-            .map_err(cli_err)?;
+        let result = self.cli.run(&["links", &file_arg]).await.map_err(cli_err)?;
         let links = parse_as_links(&result);
         let count = links.len();
         Ok(Json(LinkList {
@@ -764,11 +834,7 @@ impl ObsidianServer {
         description = "Read the content of today's daily note. Returns the full markdown content."
     )]
     async fn daily_read(&self) -> Result<Json<FileContent>, String> {
-        let content = self
-            .cli
-            .run_raw(&["daily:read"])
-            .await
-            .map_err(cli_err)?;
+        let content = self.cli.run_raw(&["daily:read"]).await.map_err(cli_err)?;
         let path = self
             .cli
             .run_raw(&["daily:path"])
@@ -834,12 +900,17 @@ impl ObsidianServer {
             .run(&["outline", &file_arg])
             .await
             .map_err(cli_err)?;
-        let headings: Vec<OutlineEntry> = serde_json::from_value(result.clone()).unwrap_or_else(|_| {
-            parse_json_array_as_strings(&result)
-                .into_iter()
-                .map(|heading| OutlineEntry { heading, level: 0, line: None })
-                .collect()
-        });
+        let headings: Vec<OutlineEntry> =
+            serde_json::from_value(result.clone()).unwrap_or_else(|_| {
+                parse_json_array_as_strings(&result)
+                    .into_iter()
+                    .map(|heading| OutlineEntry {
+                        heading,
+                        level: 0,
+                        line: None,
+                    })
+                    .collect()
+            });
         Ok(Json(OutlineResult {
             file: args.file,
             headings,
@@ -856,7 +927,12 @@ impl ObsidianServer {
         let tasks: Vec<TaskItem> = serde_json::from_value(result.clone()).unwrap_or_else(|_| {
             parse_json_array_as_strings(&result)
                 .into_iter()
-                .map(|text| TaskItem { text, file: String::new(), completed: false, line: None })
+                .map(|text| TaskItem {
+                    text,
+                    file: String::new(),
+                    completed: false,
+                    line: None,
+                })
                 .collect()
         });
         let total = tasks.len();
@@ -880,10 +956,15 @@ impl ObsidianServer {
             .map_err(cli_err)?;
         let wc: WordCountResult = serde_json::from_value(result.clone()).unwrap_or_else(|_| {
             let raw = parse_json_array_as_strings(&result).join(" ");
-            let words = raw.split_whitespace()
+            let words = raw
+                .split_whitespace()
                 .find_map(|w| w.parse::<u64>().ok())
                 .unwrap_or(0);
-            WordCountResult { file: args.file.clone(), words, characters: None }
+            WordCountResult {
+                file: args.file.clone(),
+                words,
+                characters: None,
+            }
         });
         Ok(Json(wc))
     }
@@ -900,7 +981,10 @@ impl ObsidianServer {
         Ok(Json(TemplateList { templates, count }))
     }
 
-    #[tool(name = "list_commands", description = "List all available Obsidian commands with their IDs.")]
+    #[tool(
+        name = "list_commands",
+        description = "List all available Obsidian commands with their IDs."
+    )]
     async fn list_commands(&self) -> Result<Json<CommandList>, String> {
         let result = self.cli.run(&["commands"]).await.map_err(cli_err)?;
         let commands = parse_json_array_as_strings(&result);
@@ -922,10 +1006,7 @@ impl ObsidianServer {
             );
         }
         let id_arg = format!("id={}", args.id);
-        self.cli
-            .run(&["command", &id_arg])
-            .await
-            .map_err(cli_err)?;
+        self.cli.run(&["command", &id_arg]).await.map_err(cli_err)?;
         Ok(Json(CommandResult {
             command: args.id,
             message: "Command executed".into(),
@@ -945,11 +1026,7 @@ impl ObsidianServer {
             return Err("eval_js is disabled. Set ENABLE_DANGEROUS_TOOLS=true to enable.".into());
         }
         let code_arg = format!("code={}", args.code);
-        let result = self
-            .cli
-            .run(&["eval", &code_arg])
-            .await
-            .map_err(cli_err)?;
+        let result = self.cli.run(&["eval", &code_arg]).await.map_err(cli_err)?;
         Ok(Json(EvalResult {
             result: serde_json::to_string(&result).unwrap_or_default(),
         }))
@@ -1093,27 +1170,33 @@ impl ServerHandler for ObsidianServer {
         let uri = request.uri.as_str();
         match uri {
             "vault://files" => {
-                let result = self.cli.run(&["files"]).await.map_err(|e| {
-                    McpError::internal_error(e.to_tool_error(), None)
-                })?;
+                let result = self
+                    .cli
+                    .run(&["files"])
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_tool_error(), None))?;
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                     &request.uri,
                 )]))
             }
             "vault://folders" => {
-                let result = self.cli.run(&["folders"]).await.map_err(|e| {
-                    McpError::internal_error(e.to_tool_error(), None)
-                })?;
+                let result = self
+                    .cli
+                    .run(&["folders"])
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_tool_error(), None))?;
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                     &request.uri,
                 )]))
             }
             "vault://tags" => {
-                let result = self.cli.run(&["tags"]).await.map_err(|e| {
-                    McpError::internal_error(e.to_tool_error(), None)
-                })?;
+                let result = self
+                    .cli
+                    .run(&["tags"])
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_tool_error(), None))?;
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                     &request.uri,

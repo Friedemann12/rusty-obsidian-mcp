@@ -67,7 +67,11 @@ impl ObsidianCli {
                     return Ok(());
                 }
                 Err(e) if attempt < MAX_RETRIES => {
-                    tracing::warn!("Health check failed: {}. Retrying in {}s...", e, RETRY_DELAY.as_secs());
+                    tracing::warn!(
+                        "Health check failed: {}. Retrying in {}s...",
+                        e,
+                        RETRY_DELAY.as_secs()
+                    );
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
                 Err(e) => {
@@ -82,7 +86,10 @@ impl ObsidianCli {
     async fn ensure_vault_open(&self) {
         let Some(ref vault) = self.vault else { return };
         tracing::info!("Ensuring vault '{}' is open...", vault);
-        match self.run_bare(&["vault:open", &format!("vault={vault}")]).await {
+        match self
+            .run_bare(&["vault:open", &format!("vault={vault}")])
+            .await
+        {
             Ok(_) => tracing::info!("Vault '{vault}' opened"),
             Err(CliError::NonZero { code: Some(-1), .. }) => {
                 tracing::info!("Vault '{vault}' is already open");

@@ -9,7 +9,10 @@ use types::*;
 #[test]
 fn file_list_from_json_array() {
     let raw = json!(["notes/hello.md", "projects/todo.md", "README.md"]);
-    let files: Vec<String> = raw.as_array().unwrap().iter()
+    let files: Vec<String> = raw
+        .as_array()
+        .unwrap()
+        .iter()
         .filter_map(|v| v.as_str().map(String::from))
         .collect();
     assert_eq!(files.len(), 3);
@@ -74,9 +77,14 @@ fn properties_as_object_to_string_values() {
         "tags": ["rust", "mcp"],
         "draft": false
     });
-    let properties: Vec<PropertyValue> = raw.as_object().unwrap()
+    let properties: Vec<PropertyValue> = raw
+        .as_object()
+        .unwrap()
         .iter()
-        .map(|(k, v)| PropertyValue { name: k.clone(), value: v.to_string() })
+        .map(|(k, v)| PropertyValue {
+            name: k.clone(),
+            value: v.to_string(),
+        })
         .collect();
     assert_eq!(properties.len(), 3);
     let tags_prop = properties.iter().find(|p| p.name == "tags").unwrap();
@@ -126,14 +134,23 @@ fn wordcount() {
 
 #[test]
 fn success_result_serialize() {
-    let result = SuccessResult { success: true, message: "Done".into() };
+    let result = SuccessResult {
+        success: true,
+        message: "Done".into(),
+    };
     let json = serde_json::to_value(&result).unwrap();
     assert_eq!(json["success"], true);
 }
 
 #[test]
 fn file_info_skips_none_fields() {
-    let info = FileInfo { path: "test.md".into(), name: None, size: None, created: None, modified: None };
+    let info = FileInfo {
+        path: "test.md".into(),
+        name: None,
+        size: None,
+        created: None,
+        modified: None,
+    };
     let json = serde_json::to_value(&info).unwrap();
     assert!(json.get("name").is_none());
     assert_eq!(json["path"], "test.md");
@@ -142,7 +159,9 @@ fn file_info_skips_none_fields() {
 #[test]
 fn plain_text_lines_to_string_vec() {
     let array = json!(["folder_a", "folder_b/sub", "folder_c"]);
-    let strings: Vec<String> = array.as_array().unwrap()
+    let strings: Vec<String> = array
+        .as_array()
+        .unwrap()
         .iter()
         .filter_map(|v| v.as_str().map(String::from))
         .collect();
@@ -152,11 +171,16 @@ fn plain_text_lines_to_string_vec() {
 #[test]
 fn search_fallback_from_string_array() {
     let val = json!(["notes/a.md", "notes/b.md"]);
-    let results: Vec<SearchFileResult> = serde_json::from_value::<Vec<SearchFileResult>>(val.clone())
-        .unwrap_or_else(|_| {
-            val.as_array().unwrap().iter()
+    let results: Vec<SearchFileResult> =
+        serde_json::from_value::<Vec<SearchFileResult>>(val.clone()).unwrap_or_else(|_| {
+            val.as_array()
+                .unwrap()
+                .iter()
                 .filter_map(|v| v.as_str())
-                .map(|file| SearchFileResult { file: file.into(), matches: vec![] })
+                .map(|file| SearchFileResult {
+                    file: file.into(),
+                    matches: vec![],
+                })
                 .collect()
         });
     assert_eq!(results.len(), 2);
@@ -166,7 +190,11 @@ fn search_fallback_from_string_array() {
 
 #[test]
 fn patch_result_serialize() {
-    let result = PatchResult { path: "notes/a.md".into(), replacements: 1, message: "Patched".into() };
+    let result = PatchResult {
+        path: "notes/a.md".into(),
+        replacements: 1,
+        message: "Patched".into(),
+    };
     let json = serde_json::to_value(&result).unwrap();
     assert_eq!(json["replacements"], 1);
 }

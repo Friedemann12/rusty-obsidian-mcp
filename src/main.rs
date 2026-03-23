@@ -58,10 +58,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(std::io::stderr)
@@ -108,7 +105,10 @@ async fn main() -> anyhow::Result<()> {
             };
             if args.no_auth {
                 tracing::warn!("Auth is DISABLED -- endpoint is unprotected!");
-                eprintln!("\n  MCP endpoint: http://{}:{}/mcp (NO AUTH)\n", args.host, args.port);
+                eprintln!(
+                    "\n  MCP endpoint: http://{}:{}/mcp (NO AUTH)\n",
+                    args.host, args.port
+                );
             }
             run_http(obsidian_cli, &args.host, args.port, api_key).await
         }
@@ -154,7 +154,13 @@ fn print_auth_info(api_key: &str, endpoint: &str) {
     ];
     let w = lines
         .iter()
-        .map(|(l, v)| if v.is_empty() { 0 } else { l.len() + 3 + v.len() })
+        .map(|(l, v)| {
+            if v.is_empty() {
+                0
+            } else {
+                l.len() + 3 + v.len()
+            }
+        })
         .max()
         .unwrap_or(40);
 
@@ -195,8 +201,7 @@ async fn run_http(
     api_key: Option<auth::ApiKey>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        session::local::LocalSessionManager,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let ct = tokio_util::sync::CancellationToken::new();
@@ -216,7 +221,10 @@ async fn run_http(
         use axum::middleware;
         axum::Router::new()
             .nest_service("/mcp", mcp_service)
-            .layer(middleware::from_fn_with_state(key.clone(), auth::require_api_key))
+            .layer(middleware::from_fn_with_state(
+                key.clone(),
+                auth::require_api_key,
+            ))
             .with_state(key)
     } else {
         axum::Router::new().nest_service("/mcp", mcp_service)
@@ -246,8 +254,7 @@ async fn run_tunnel(
 ) -> anyhow::Result<()> {
     use ngrok::config::ForwarderBuilder;
     use rmcp::transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        session::local::LocalSessionManager,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
     use url::Url;
 
@@ -268,7 +275,10 @@ async fn run_tunnel(
         use axum::middleware;
         axum::Router::new()
             .nest_service("/mcp", mcp_service)
-            .layer(middleware::from_fn_with_state(key.clone(), auth::require_api_key))
+            .layer(middleware::from_fn_with_state(
+                key.clone(),
+                auth::require_api_key,
+            ))
             .with_state(key.clone())
     } else {
         axum::Router::new().nest_service("/mcp", mcp_service)
