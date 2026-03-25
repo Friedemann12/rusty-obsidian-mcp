@@ -23,6 +23,12 @@ pub struct FilePathArg {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FolderPathArg {
+    /// Folder path relative to vault root (e.g., "projects/ideas")
+    pub path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListFilesArgs {
     /// Optional sort order: "name", "modified", "created", "size" (default: "name")
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,47 +168,84 @@ pub struct ObsidianServer {
     prompt_router: PromptRouter<Self>,
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────
+
 fn cli_err(e: crate::cli::CliError) -> String {
     e.to_tool_error()
 }
 
-fn eval_modify_js(path: &str, content: &str) -> String {
-    let payload = json!({ "path": path, "content": content });
-    let encoded = payload
+fn cli_arg(key: &str, value: &str) -> String {
+    format!("{key}={value}")
+}
+
+fn encode_js_payload(payload: &serde_json::Value) -> String {
+    payload
         .to_string()
         .replace('\\', "\\\\")
-        .replace('\'', "\\'");
+        .replace('\'', "\\'")
+}
+
+fn eval_modify_js(path: &str, content: &str) -> String {
+    let encoded = encode_js_payload(&json!({ "path": path, "content": content }));
     format!(
         r#"(async()=>{{const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);await app.vault.modify(f,d.content);}})()"#
     )
 }
 
 fn eval_patch_js(path: &str, find: &str, replace: &str, replace_all: bool) -> String {
-    let payload = json!({ "path": path, "find": find, "replace": replace });
-    let encoded = payload
-        .to_string()
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'");
+    let encoded = encode_js_payload(&json!({ "path": path, "find": find, "replace": replace }));
     let method = if replace_all { "replaceAll" } else { "replace" };
     format!(
-        r#"(async()=>{{const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);let c=await app.vault.read(f);c=c.{method}(d.find,d.replace);await app.vault.modify(f,c);}})()"#
+        r#"(async()=>{{const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);let c=await app.vault.read(f);const o=c;c=c.{method}(d.find,d.replace);const n=o.length-c.replace(new RegExp(d.find.replace(/[.*+?^${{}}()|[\]\\]/g,'\\$&'),'g'),'').length;const r=o.length===c.length?0:n===0?1:Math.round(n/d.find.length);await app.vault.modify(f,c);return r;}})()"#
     )
 }
 
 fn eval_replace_line_js(path: &str, line: u32, expected: &str, replace: &str) -> String {
-    let payload = json!({
+    let encoded = encode_js_payload(&json!({
         "path": path,
         "line": line,
         "expected": expected,
         "replace": replace
-    });
-    let encoded = payload
-        .to_string()
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'");
+    }));
     format!(
         r#"(async()=>{{const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);let c=await app.vault.read(f);const lines=c.split(/\r?\n/);const idx=d.line-1;if(!Number.isInteger(d.line)||d.line<1)throw new Error('Line number must be >= 1');if(idx>=lines.length)throw new Error('Line '+d.line+' out of range (file has '+lines.length+' lines)');if(lines[idx]!==d.expected)throw new Error('Line '+d.line+' conflict: expected "'+d.expected+'" but found "'+lines[idx]+'"');lines[idx]=d.replace;const eol=c.includes('\r\n')?'\r\n':'\n';await app.vault.modify(f,lines.join(eol));}})()"#
     )
+}
+
+fn eval_set_property_js(path: &str, name: &str, value: &serde_json::Value) -> String {
+    let encoded = encode_js_payload(&json!({
+        "path": path,
+        "name": name,
+        "value": value
+    }));
+    format!(
+        r#"(async()=>{{const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);await app.fileManager.processFrontMatter(f,(fm)=>{{fm[d.name]=d.value;}});}})()"#
+    )
+}
+
+fn eval_remove_property_js(path: &str, name: &str) -> String {
+    let encoded = encode_js_payload(&json!({
+        "path": path,
+        "name": name
+    }));
+    format!(
+        r#"(async()=>{{const d=JSON.parse('{encoded}');const f=app.vault.getAbstractFileByPath(d.path);if(!f)throw new Error('File not found: '+d.path);await app.fileManager.processFrontMatter(f,(fm)=>{{delete fm[d.name];}});}})()"#
+    )
+}
+
+fn eval_create_folder_js(path: &str) -> String {
+    let encoded = encode_js_payload(&json!({ "path": path }));
+    format!(
+        r#"(async()=>{{const d=JSON.parse('{encoded}');const parts=d.path.split('/');let cur='';for(const p of parts){{cur=cur?cur+'/'+p:p;if(!app.vault.getAbstractFileByPath(cur))await app.vault.createFolder(cur);}};}})()"#
+    )
+}
+
+fn eval_ensure_parent_js(file_path: &str) -> Option<String> {
+    let parent = file_path.rsplit_once('/').map(|(p, _)| p)?;
+    if parent.is_empty() {
+        return None;
+    }
+    Some(eval_create_folder_js(parent))
 }
 
 fn parse_json_array_as_strings(val: &serde_json::Value) -> Vec<String> {
@@ -253,9 +296,13 @@ impl ObsidianServer {
         }
     }
 
-    // ── Files & Folders (10 tools) ───────────────────────────────────
+    async fn run_eval(&self, js: &str) -> Result<serde_json::Value, String> {
+        let code_arg = cli_arg("code", js);
+        self.cli.run(&["eval", &code_arg]).await.map_err(cli_err)
+    }
 
-    /// List all files in the vault. Returns file paths sorted by name.
+    // ── Files & Folders ──────────────────────────────────────────────
+
     #[tool(
         name = "list_files",
         description = "List all files in the vault. Returns file paths. Optionally sort by 'name', 'modified', 'created', or 'size' and limit results."
@@ -267,12 +314,12 @@ impl ObsidianServer {
         let mut cli_args = vec!["files"];
         let sort_arg;
         if let Some(ref sort) = args.sort {
-            sort_arg = format!("sort={}", sort);
+            sort_arg = cli_arg("sort", sort);
             cli_args.push(&sort_arg);
         }
         let limit_arg;
-        if let Some(limit) = args.limit {
-            limit_arg = format!("limit={}", limit);
+        if let Some(ref limit) = args.limit {
+            limit_arg = cli_arg("limit", limit);
             cli_args.push(&limit_arg);
         }
         let result = self.cli.run(&cli_args).await.map_err(cli_err)?;
@@ -281,7 +328,6 @@ impl ObsidianServer {
         Ok(Json(FileList { files, count }))
     }
 
-    /// List all folders in the vault.
     #[tool(
         name = "list_folders",
         description = "List all folders in the vault. Returns the folder hierarchy as a list of paths."
@@ -293,7 +339,6 @@ impl ObsidianServer {
         Ok(Json(FolderList { folders, count }))
     }
 
-    /// Read a file's full content.
     #[tool(
         name = "read_file",
         description = "Read a file's full content from the vault. Returns markdown including frontmatter. Path is relative to vault root (e.g., 'notes/my-note.md')."
@@ -302,7 +347,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<FileContent>, String> {
-        let file_arg = format!("file={}", args.file);
+        let file_arg = cli_arg("file", &args.file);
         let result = self
             .cli
             .run_raw(&["read", &file_arg])
@@ -314,7 +359,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Get file metadata.
     #[tool(
         name = "file_info",
         description = "Get metadata for a file: path, name, size, created/modified dates. Path is relative to vault root."
@@ -323,36 +367,39 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<FileInfo>, String> {
-        let file_arg = format!("file={}", args.file);
+        let file_arg = cli_arg("file", &args.file);
         let result = self.cli.run(&["file", &file_arg]).await.map_err(cli_err)?;
         let info = serde_json::from_value(result)
             .map_err(|e| format!("Failed to parse file info: {}", e))?;
         Ok(Json(info))
     }
 
-    /// Create a new note.
     #[tool(
         name = "create_file",
-        description = "Create a new note in the vault. Provide a path (e.g., 'projects/new-idea.md'), optional content, and optional template name."
+        description = "Create a new note in the vault. Provide a path (e.g., 'projects/new-idea.md'), optional content, and optional template name. Parent folders are created automatically."
     )]
     async fn create_file(
         &self,
         Parameters(args): Parameters<CreateFileArgs>,
     ) -> Result<Json<FileCreated>, String> {
+        if let Some(js) = eval_ensure_parent_js(&args.name) {
+            self.run_eval(&js).await.ok();
+        }
+
         let path_arg = if args.name.contains('/') || args.name.contains('\\') {
-            format!("path={}", args.name)
+            cli_arg("path", &args.name)
         } else {
-            format!("name={}", args.name)
+            cli_arg("name", &args.name)
         };
         let mut cli_args = vec!["create", &path_arg];
         let content_arg;
         if let Some(ref content) = args.content {
-            content_arg = format!("content={}", content);
+            content_arg = cli_arg("content", content);
             cli_args.push(&content_arg);
         }
         let template_arg;
         if let Some(ref template) = args.template {
-            template_arg = format!("template={}", template);
+            template_arg = cli_arg("template", template);
             cli_args.push(&template_arg);
         }
         self.cli.run(&cli_args).await.map_err(cli_err)?;
@@ -362,7 +409,22 @@ impl ObsidianServer {
         }))
     }
 
-    /// Append content to a file.
+    #[tool(
+        name = "create_folder",
+        description = "Create a folder (and any missing parent folders) in the vault. Path is relative to vault root (e.g., 'projects/ideas')."
+    )]
+    async fn create_folder(
+        &self,
+        Parameters(args): Parameters<FolderPathArg>,
+    ) -> Result<Json<SuccessResult>, String> {
+        let js = eval_create_folder_js(&args.path);
+        self.run_eval(&js).await?;
+        Ok(Json(SuccessResult {
+            success: true,
+            message: format!("Folder '{}' created", args.path),
+        }))
+    }
+
     #[tool(
         name = "append_to_file",
         description = "Append content to the end of a file. Content is added after existing text. Path relative to vault root."
@@ -371,8 +433,8 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<AppendPrependArgs>,
     ) -> Result<Json<FileModified>, String> {
-        let file_arg = format!("file={}", args.file);
-        let content_arg = format!("content={}", args.content);
+        let file_arg = cli_arg("file", &args.file);
+        let content_arg = cli_arg("content", &args.content);
         self.cli
             .run(&["append", &file_arg, &content_arg])
             .await
@@ -383,7 +445,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Prepend content to a file (after frontmatter).
     #[tool(
         name = "prepend_to_file",
         description = "Prepend content to a file, inserted after any existing frontmatter. Path relative to vault root."
@@ -392,8 +453,8 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<AppendPrependArgs>,
     ) -> Result<Json<FileModified>, String> {
-        let file_arg = format!("file={}", args.file);
-        let content_arg = format!("content={}", args.content);
+        let file_arg = cli_arg("file", &args.file);
+        let content_arg = cli_arg("content", &args.content);
         self.cli
             .run(&["prepend", &file_arg, &content_arg])
             .await
@@ -412,9 +473,8 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<AppendPrependArgs>,
     ) -> Result<Json<FileModified>, String> {
-        let js = eval_modify_js(&args.file, &args.content);
-        let code_arg = format!("code={js}");
-        self.cli.run(&["eval", &code_arg]).await.map_err(cli_err)?;
+        self.run_eval(&eval_modify_js(&args.file, &args.content))
+            .await?;
         Ok(Json(FileModified {
             path: args.file,
             message: "File updated".into(),
@@ -423,7 +483,7 @@ impl ObsidianServer {
 
     #[tool(
         name = "patch_file",
-        description = "Find and replace text within a file. Set replace_all=true for all occurrences."
+        description = "Find and replace text within a file. Set replace_all=true for all occurrences. Returns the number of replacements made."
     )]
     async fn patch_file(
         &self,
@@ -431,12 +491,12 @@ impl ObsidianServer {
     ) -> Result<Json<PatchResult>, String> {
         let replace_all = args.replace_all.unwrap_or(false);
         let js = eval_patch_js(&args.file, &args.find, &args.replace, replace_all);
-        let code_arg = format!("code={js}");
-        self.cli.run(&["eval", &code_arg]).await.map_err(cli_err)?;
+        let result = self.run_eval(&js).await?;
+        let replacements = result.as_u64().unwrap_or(if replace_all { 0 } else { 1 }) as usize;
         Ok(Json(PatchResult {
             path: args.file,
-            replacements: if replace_all { 0 } else { 1 },
-            message: "Patch applied".into(),
+            replacements,
+            message: format!("{} replacement(s) applied", replacements),
         }))
     }
 
@@ -448,9 +508,13 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<ReplaceLineArgs>,
     ) -> Result<Json<FileModified>, String> {
-        let js = eval_replace_line_js(&args.file, args.line, &args.expected, &args.replace);
-        let code_arg = format!("code={js}");
-        self.cli.run(&["eval", &code_arg]).await.map_err(cli_err)?;
+        self.run_eval(&eval_replace_line_js(
+            &args.file,
+            args.line,
+            &args.expected,
+            &args.replace,
+        ))
+        .await?;
         Ok(Json(FileModified {
             path: args.file,
             message: format!("Line {} replaced", args.line),
@@ -465,8 +529,8 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<MoveFileArgs>,
     ) -> Result<Json<FileModified>, String> {
-        let file_arg = format!("file={}", args.file);
-        let to_arg = format!("to={}", args.to);
+        let file_arg = cli_arg("file", &args.file);
+        let to_arg = cli_arg("to", &args.to);
         self.cli
             .run(&["move", &file_arg, &to_arg])
             .await
@@ -477,7 +541,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Rename a file.
     #[tool(
         name = "rename_file",
         description = "Rename a file in the vault. Path relative to vault root."
@@ -486,8 +549,8 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<RenameFileArgs>,
     ) -> Result<Json<FileModified>, String> {
-        let file_arg = format!("file={}", args.file);
-        let to_arg = format!("to={}", args.to);
+        let file_arg = cli_arg("file", &args.file);
+        let to_arg = cli_arg("to", &args.to);
         self.cli
             .run(&["rename", &file_arg, &to_arg])
             .await
@@ -498,7 +561,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Delete a file (moves to trash).
     #[tool(
         name = "delete_file",
         description = "Delete a file from the vault (moves to system trash, recoverable). DESTRUCTIVE operation. Path relative to vault root."
@@ -507,7 +569,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<SuccessResult>, String> {
-        let file_arg = format!("file={}", args.file);
+        let file_arg = cli_arg("file", &args.file);
         self.cli
             .run(&["delete", &file_arg])
             .await
@@ -518,9 +580,8 @@ impl ObsidianServer {
         }))
     }
 
-    // ── Search (2 tools) ─────────────────────────────────────────────
+    // ── Search ───────────────────────────────────────────────────────
 
-    /// Full-text search across the vault.
     #[tool(
         name = "search",
         description = "Full-text search across all notes in the vault. Returns matching file paths."
@@ -529,7 +590,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<Json<SearchResults>, String> {
-        let query_arg = format!("query={}", args.query);
+        let query_arg = cli_arg("query", &args.query);
         let result = self
             .cli
             .run(&["search", &query_arg])
@@ -544,7 +605,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Search with surrounding context (grep-like).
     #[tool(
         name = "search_context",
         description = "Search with surrounding context lines (grep-like). Returns matches with context around each hit."
@@ -553,7 +613,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<Json<SearchResults>, String> {
-        let query_arg = format!("query={}", args.query);
+        let query_arg = cli_arg("query", &args.query);
         let result = self
             .cli
             .run(&["search:context", &query_arg])
@@ -568,9 +628,8 @@ impl ObsidianServer {
         }))
     }
 
-    // ── Graph & Links (5 tools) ──────────────────────────────────────
+    // ── Graph & Links ────────────────────────────────────────────────
 
-    /// Get outgoing links from a file.
     #[tool(
         name = "get_links",
         description = "Get all outgoing links from a file. Shows what this note links to. Path relative to vault root."
@@ -579,7 +638,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<LinkList>, String> {
-        let file_arg = format!("file={}", args.file);
+        let file_arg = cli_arg("file", &args.file);
         let result = self.cli.run(&["links", &file_arg]).await.map_err(cli_err)?;
         let links = parse_as_links(&result);
         let count = links.len();
@@ -590,7 +649,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Get incoming links (backlinks) to a file.
     #[tool(
         name = "get_backlinks",
         description = "Get all incoming links (backlinks) to a file. Shows which notes reference this one. Path relative to vault root."
@@ -599,7 +657,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<BacklinkList>, String> {
-        let file_arg = format!("file={}", args.file);
+        let file_arg = cli_arg("file", &args.file);
         let result = self
             .cli
             .run(&["backlinks", &file_arg])
@@ -614,7 +672,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Get unresolved links (links pointing to non-existent files).
     #[tool(
         name = "get_unresolved_links",
         description = "List all unresolved links in the vault -- links pointing to notes that don't exist yet. Useful for finding gaps."
@@ -626,7 +683,6 @@ impl ObsidianServer {
         Ok(Json(FilePathList { files, count }))
     }
 
-    /// Get orphan files (no incoming links).
     #[tool(
         name = "get_orphans",
         description = "List orphan notes -- files with no incoming links from other notes. These may be forgotten or disconnected."
@@ -638,7 +694,6 @@ impl ObsidianServer {
         Ok(Json(FilePathList { files, count }))
     }
 
-    /// Get dead-end files (no outgoing links).
     #[tool(
         name = "get_deadends",
         description = "List dead-end notes -- files with no outgoing links to other notes. Consider adding connections."
@@ -650,9 +705,8 @@ impl ObsidianServer {
         Ok(Json(FilePathList { files, count }))
     }
 
-    // ── Properties (4 tools) ─────────────────────────────────────────
+    // ── Properties ───────────────────────────────────────────────────
 
-    /// Read frontmatter properties of a file.
     #[tool(
         name = "get_properties",
         description = "Read all frontmatter properties from a file. Returns key-value pairs from the YAML frontmatter block."
@@ -661,7 +715,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<PropertyList>, String> {
-        let file_arg = format!("file={}", args.file);
+        let file_arg = cli_arg("file", &args.file);
         let result = self
             .cli
             .run(&["properties", &file_arg])
@@ -683,7 +737,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Set a frontmatter property.
     #[tool(
         name = "set_property",
         description = "Set a frontmatter property on a file. Creates the property if it doesn't exist, updates it if it does."
@@ -692,20 +745,16 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<SetPropertyArgs>,
     ) -> Result<Json<SuccessResult>, String> {
-        let file_arg = format!("file={}", args.file);
-        let name_arg = format!("name={}", args.name);
-        let value_arg = format!("value={}", args.value);
-        self.cli
-            .run(&["property:set", &file_arg, &name_arg, &value_arg])
-            .await
-            .map_err(cli_err)?;
+        let parsed_value = serde_json::from_str::<serde_json::Value>(&args.value)
+            .unwrap_or_else(|_| serde_json::Value::String(args.value.clone()));
+        self.run_eval(&eval_set_property_js(&args.file, &args.name, &parsed_value))
+            .await?;
         Ok(Json(SuccessResult {
             success: true,
             message: format!("Property '{}' set on '{}'", args.name, args.file),
         }))
     }
 
-    /// Remove a frontmatter property.
     #[tool(
         name = "remove_property",
         description = "Remove a frontmatter property from a file. The key and its value are deleted from the YAML block."
@@ -714,19 +763,14 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<RemovePropertyArgs>,
     ) -> Result<Json<SuccessResult>, String> {
-        let file_arg = format!("file={}", args.file);
-        let name_arg = format!("name={}", args.name);
-        self.cli
-            .run(&["property:remove", &file_arg, &name_arg])
-            .await
-            .map_err(cli_err)?;
+        self.run_eval(&eval_remove_property_js(&args.file, &args.name))
+            .await?;
         Ok(Json(SuccessResult {
             success: true,
             message: format!("Property '{}' removed from '{}'", args.name, args.file),
         }))
     }
 
-    /// Get file aliases.
     #[tool(
         name = "get_aliases",
         description = "Get all aliases for a file from its frontmatter. Aliases are alternative names for linking."
@@ -735,7 +779,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<AliasList>, String> {
-        let file_arg = format!("file={}", args.file);
+        let file_arg = cli_arg("file", &args.file);
         let result = self
             .cli
             .run(&["aliases", &file_arg])
@@ -748,9 +792,8 @@ impl ObsidianServer {
         }))
     }
 
-    // ── Tags (3 tools) ───────────────────────────────────────────────
+    // ── Tags ─────────────────────────────────────────────────────────
 
-    /// List all tags in the vault with counts.
     #[tool(
         name = "list_tags",
         description = "List all tags used across the vault with their usage counts. Tags include both frontmatter tags and inline #tags."
@@ -767,7 +810,6 @@ impl ObsidianServer {
         Ok(Json(TagList { tags, total }))
     }
 
-    /// List files with a specific tag.
     #[tool(
         name = "files_by_tag",
         description = "List all files tagged with a specific tag. Provide tag name without # prefix (e.g., 'project' not '#project')."
@@ -776,7 +818,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<TagArg>,
     ) -> Result<Json<TagFiles>, String> {
-        let tag_arg = format!("tag={}", args.tag);
+        let tag_arg = cli_arg("tag", &args.tag);
         let result = self.cli.run(&["tag", &tag_arg]).await.map_err(cli_err)?;
         let files = parse_json_array_as_strings(&result);
         let count = files.len();
@@ -787,7 +829,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Rename a tag vault-wide.
     #[tool(
         name = "rename_tag",
         description = "Bulk rename a tag across the entire vault. Updates all occurrences in frontmatter and inline tags. Provide names without # prefix."
@@ -796,8 +837,8 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<RenameTagArgs>,
     ) -> Result<Json<SuccessResult>, String> {
-        let old_arg = format!("old={}", args.old);
-        let new_arg = format!("new={}", args.new);
+        let old_arg = cli_arg("old", &args.old);
+        let new_arg = cli_arg("new", &args.new);
         self.cli
             .run(&["tags:rename", &old_arg, &new_arg])
             .await
@@ -808,9 +849,8 @@ impl ObsidianServer {
         }))
     }
 
-    // ── Daily Notes (4 tools) ────────────────────────────────────────
+    // ── Daily Notes ──────────────────────────────────────────────────
 
-    /// Open or create today's daily note.
     #[tool(
         name = "daily_open",
         description = "Open or create today's daily note in Obsidian. Creates the note using the daily note template if it doesn't exist."
@@ -828,22 +868,20 @@ impl ObsidianServer {
         }))
     }
 
-    /// Read today's daily note content.
     #[tool(
         name = "daily_read",
         description = "Read the content of today's daily note. Returns the full markdown content."
     )]
     async fn daily_read(&self) -> Result<Json<FileContent>, String> {
-        let content = self.cli.run_raw(&["daily:read"]).await.map_err(cli_err)?;
-        let path = self
-            .cli
-            .run_raw(&["daily:path"])
-            .await
-            .map_or_else(|_| "daily note".into(), |p| p.trim().to_string());
+        let (content_res, path_res) = tokio::join!(
+            self.cli.run_raw(&["daily:read"]),
+            self.cli.run_raw(&["daily:path"]),
+        );
+        let content = content_res.map_err(cli_err)?;
+        let path = path_res.map_or_else(|_| "daily note".into(), |p| p.trim().to_string());
         Ok(Json(FileContent { path, content }))
     }
 
-    /// Append to today's daily note.
     #[tool(
         name = "daily_append",
         description = "Append content to the end of today's daily note. Creates the daily note first if it doesn't exist."
@@ -852,7 +890,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<DailyContentArgs>,
     ) -> Result<Json<DailyNoteResult>, String> {
-        let content_arg = format!("content={}", args.content);
+        let content_arg = cli_arg("content", &args.content);
         self.cli
             .run(&["daily:append", &content_arg])
             .await
@@ -863,7 +901,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Prepend to today's daily note.
     #[tool(
         name = "daily_prepend",
         description = "Prepend content to today's daily note (inserted after frontmatter). Creates the daily note first if it doesn't exist."
@@ -872,7 +909,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<DailyContentArgs>,
     ) -> Result<Json<DailyNoteResult>, String> {
-        let content_arg = format!("content={}", args.content);
+        let content_arg = cli_arg("content", &args.content);
         self.cli
             .run(&["daily:prepend", &content_arg])
             .await
@@ -883,9 +920,8 @@ impl ObsidianServer {
         }))
     }
 
-    // ── Misc (6 tools) ───────────────────────────────────────────────
+    // ── Misc ─────────────────────────────────────────────────────────
 
-    /// Get heading structure of a file.
     #[tool(
         name = "get_outline",
         description = "Get the heading outline of a file. Returns headings with their levels (H1-H6) and line numbers."
@@ -894,7 +930,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<OutlineResult>, String> {
-        let file_arg = format!("file={}", args.file);
+        let file_arg = cli_arg("file", &args.file);
         let result = self
             .cli
             .run(&["outline", &file_arg])
@@ -917,7 +953,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// List all tasks in the vault.
     #[tool(
         name = "list_tasks",
         description = "List all tasks (checkboxes) across the vault. Returns task text, source file, completion status, and line number."
@@ -939,7 +974,6 @@ impl ObsidianServer {
         Ok(Json(VaultTaskList { tasks, total }))
     }
 
-    /// Get word count for a file.
     #[tool(
         name = "get_wordcount",
         description = "Get the word and character count for a file. Path relative to vault root."
@@ -948,7 +982,7 @@ impl ObsidianServer {
         &self,
         Parameters(args): Parameters<FilePathArg>,
     ) -> Result<Json<WordCountResult>, String> {
-        let file_arg = format!("file={}", args.file);
+        let file_arg = cli_arg("file", &args.file);
         let result = self
             .cli
             .run(&["wordcount", &file_arg])
@@ -969,7 +1003,6 @@ impl ObsidianServer {
         Ok(Json(wc))
     }
 
-    /// List available templates.
     #[tool(
         name = "list_templates",
         description = "List all available templates in the vault's templates folder. Use template names with create_file."
@@ -1005,7 +1038,7 @@ impl ObsidianServer {
                 "execute_command is disabled. Set ENABLE_DANGEROUS_TOOLS=true to enable.".into(),
             );
         }
-        let id_arg = format!("id={}", args.id);
+        let id_arg = cli_arg("id", &args.id);
         self.cli.run(&["command", &id_arg]).await.map_err(cli_err)?;
         Ok(Json(CommandResult {
             command: args.id,
@@ -1013,7 +1046,6 @@ impl ObsidianServer {
         }))
     }
 
-    /// Execute JavaScript in Obsidian.
     #[tool(
         name = "eval_js",
         description = "Execute JavaScript code in Obsidian's runtime context. DANGEROUS: can read/write vault data, access Obsidian internals. Requires ENABLE_DANGEROUS_TOOLS=true."
@@ -1025,7 +1057,7 @@ impl ObsidianServer {
         if !self.dangerous_enabled {
             return Err("eval_js is disabled. Set ENABLE_DANGEROUS_TOOLS=true to enable.".into());
         }
-        let code_arg = format!("code={}", args.code);
+        let code_arg = cli_arg("code", &args.code);
         let result = self.cli.run(&["eval", &code_arg]).await.map_err(cli_err)?;
         Ok(Json(EvalResult {
             result: serde_json::to_string(&result).unwrap_or_default(),
@@ -1037,7 +1069,6 @@ impl ObsidianServer {
 
 #[prompt_router]
 impl ObsidianServer {
-    /// Summarize today's daily note
     #[prompt(
         name = "daily_summary",
         description = "Read today's daily note and ask for a summary. Great for end-of-day reviews."
@@ -1060,7 +1091,6 @@ impl ObsidianServer {
         )])
     }
 
-    /// Find notes related to a given topic
     #[prompt(
         name = "find_related",
         description = "Search the vault for notes related to a topic and suggest connections."
@@ -1070,7 +1100,7 @@ impl ObsidianServer {
         Parameters(args): Parameters<FindRelatedArgs>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<Vec<PromptMessage>, McpError> {
-        let query_arg = format!("query={}", args.topic);
+        let query_arg = cli_arg("query", &args.topic);
         let results = self
             .cli
             .run(&["search", &query_arg])
@@ -1086,7 +1116,6 @@ impl ObsidianServer {
         )])
     }
 
-    /// Review orphaned notes
     #[prompt(
         name = "review_orphans",
         description = "List notes with no incoming links and suggest how to integrate them into the knowledge graph."
@@ -1133,7 +1162,11 @@ impl ServerHandler for ObsidianServer {
              Obsidian app must be running with CLI enabled (v1.12+). \
              Dangerous tools (eval_js, execute_command) are {}.",
             self.cli.vault_name(),
-            if self.dangerous_enabled { "ENABLED" } else { "disabled" }
+            if self.dangerous_enabled {
+                "ENABLED"
+            } else {
+                "disabled"
+            }
         ))
     }
 

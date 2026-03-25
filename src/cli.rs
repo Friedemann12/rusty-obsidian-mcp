@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{process::Output, time::Duration};
 
 use serde_json::Value;
 use tokio::process::Command;
@@ -98,6 +98,32 @@ impl ObsidianCli {
         }
     }
 
+    fn build_command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(args);
+        if let Some(ref vault) = self.vault {
+            cmd.arg(format!("vault={vault}"));
+        }
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd
+    }
+
+    async fn command_output(&self, args: &[&str]) -> Result<Output, CliError> {
+        let output = tokio::time::timeout(self.timeout, self.build_command(args).output())
+            .await
+            .map_err(|_| CliError::Timeout(self.timeout.as_secs()))?
+            .map_err(CliError::Spawn)?;
+
+        if !output.status.success() {
+            return Err(CliError::NonZero {
+                code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(output)
+    }
+
     async fn run_bare(&self, args: &[&str]) -> Result<String, CliError> {
         let output = tokio::time::timeout(self.timeout, {
             Command::new(&self.bin)
@@ -119,31 +145,10 @@ impl ObsidianCli {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    fn build_command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(&self.bin);
-        cmd.args(args);
-        if let Some(ref vault) = self.vault {
-            cmd.arg(format!("vault={vault}"));
-        }
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        cmd
-    }
-
     /// Runs a CLI command, returning parsed JSON. Falls back to converting
     /// plain-text lines into a JSON array when the CLI doesn't return JSON.
     pub async fn run(&self, args: &[&str]) -> Result<Value, CliError> {
-        let output = tokio::time::timeout(self.timeout, self.build_command(args).output())
-            .await
-            .map_err(|_| CliError::Timeout(self.timeout.as_secs()))?
-            .map_err(CliError::Spawn)?;
-
-        if !output.status.success() {
-            return Err(CliError::NonZero {
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            });
-        }
+        let output = self.command_output(args).await?;
 
         if output.stdout.is_empty() {
             return Err(CliError::Empty);
@@ -185,17 +190,7 @@ impl ObsidianCli {
     }
 
     pub async fn run_raw(&self, args: &[&str]) -> Result<String, CliError> {
-        let output = tokio::time::timeout(self.timeout, self.build_command(args).output())
-            .await
-            .map_err(|_| CliError::Timeout(self.timeout.as_secs()))?
-            .map_err(CliError::Spawn)?;
-
-        if !output.status.success() {
-            return Err(CliError::NonZero {
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            });
-        }
+        let output = self.command_output(args).await?;
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }
