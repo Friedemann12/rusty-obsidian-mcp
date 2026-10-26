@@ -26,5 +26,5 @@ axum = { version = "0.8", optional = true }
 tokio-util = { version = "0.7", optional = true }
 rand = { version = "0.10", optional = true }
 
-ngrok = { version = "0.18", optional = true }
+ngrok = { version = "0.19", optional = true }
 url = { version = "2.5", optional = true }
