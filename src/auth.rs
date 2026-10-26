@@ -25,7 +25,7 @@ impl ApiKey {
 }
 
 fn generate_key() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let bytes: [u8; 32] = rand::rng().random();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
