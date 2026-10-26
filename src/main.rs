@@ -211,10 +211,11 @@ async fn run_http(
             move || Ok(ObsidianServer::new(cli.clone()))
         },
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig {
-            cancellation_token: ct.child_token(),
-            ..Default::default()
-        },
+        // rmcp rejects non-loopback Host headers (DNS rebinding guard); also allow the bind address.
+        // ponytail: wildcard binds (0.0.0.0) still only accept loopback hosts, add an --allowed-host flag if LAN access is needed
+        StreamableHttpServerConfig::default()
+            .with_allowed_hosts(["localhost", "127.0.0.1", "::1", host])
+            .with_cancellation_token(ct.child_token()),
     );
 
     let router = if let Some(key) = api_key {
@@ -258,6 +259,12 @@ async fn run_tunnel(
     };
     use url::Url;
 
+    let domain = if !domain_arg.is_empty() {
+        Some(domain_arg.to_string())
+    } else {
+        std::env::var("NGROK_DOMAIN").ok()
+    };
+
     let ct = tokio_util::sync::CancellationToken::new();
     let mcp_service = StreamableHttpService::new(
         {
@@ -265,10 +272,17 @@ async fn run_tunnel(
             move || Ok(ObsidianServer::new(cli.clone()))
         },
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig {
-            cancellation_token: ct.child_token(),
-            ..Default::default()
-        },
+        match &domain {
+            Some(d) => StreamableHttpServerConfig::default().with_allowed_hosts([
+                "localhost",
+                "127.0.0.1",
+                "::1",
+                d.as_str(),
+            ]),
+            // Random ngrok URL is unknown up front; API key auth is the guard here.
+            None => StreamableHttpServerConfig::default().disable_allowed_hosts(),
+        }
+        .with_cancellation_token(ct.child_token()),
     );
 
     let router = if let Some(ref key) = api_key {
@@ -293,12 +307,6 @@ async fn run_tunnel(
             tracing::error!("HTTP server error: {:?}", e);
         }
     });
-
-    let domain = if !domain_arg.is_empty() {
-        Some(domain_arg.to_string())
-    } else {
-        std::env::var("NGROK_DOMAIN").ok()
-    };
 
     tracing::info!("Connecting to ngrok...");
 

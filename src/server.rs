@@ -1,13 +1,7 @@
 use rmcp::{
-    ErrorData as McpError, Json, RoleServer, ServerHandler,
-    handler::server::{
-        router::{prompt::PromptRouter, tool::ToolRouter},
-        wrapper::Parameters,
-    },
-    model::*,
-    prompt, prompt_handler, prompt_router, schemars,
-    service::RequestContext,
-    tool, tool_handler, tool_router,
+    ErrorData as McpError, Json, RoleServer, ServerHandler, handler::server::wrapper::Parameters,
+    model::*, prompt, prompt_handler, prompt_router, schemars, service::RequestContext, tool,
+    tool_handler, tool_router,
 };
 use serde_json::json;
 
@@ -164,8 +158,6 @@ pub struct FindRelatedArgs {
 pub struct ObsidianServer {
     cli: ObsidianCli,
     dangerous_enabled: bool,
-    tool_router: ToolRouter<Self>,
-    prompt_router: PromptRouter<Self>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -291,8 +283,6 @@ impl ObsidianServer {
         Self {
             cli,
             dangerous_enabled,
-            tool_router: Self::tool_router(),
-            prompt_router: Self::prompt_router(),
         }
     }
 
@@ -1083,7 +1073,7 @@ impl ObsidianServer {
             .await
             .unwrap_or_else(|_| "(Could not read daily note -- it may not exist yet)".into());
         Ok(vec![PromptMessage::new_text(
-            PromptMessageRole::User,
+            Role::User,
             format!(
                 "Here is today's daily note from my Obsidian vault. Please provide a concise summary highlighting key points, decisions, and action items:\n\n{}",
                 content
@@ -1107,7 +1097,7 @@ impl ObsidianServer {
             .await
             .unwrap_or_else(|_| json!([]));
         Ok(vec![PromptMessage::new_text(
-            PromptMessageRole::User,
+            Role::User,
             format!(
                 "I searched my Obsidian vault for '{}' and found these results:\n\n{}\n\nPlease analyze these notes and suggest:\n1. Key connections between them\n2. Potential new notes or links to create\n3. Any knowledge gaps I should fill",
                 args.topic,
@@ -1130,7 +1120,7 @@ impl ObsidianServer {
             .await
             .unwrap_or_else(|_| json!([]));
         Ok(vec![PromptMessage::new_text(
-            PromptMessageRole::User,
+            Role::User,
             format!(
                 "These notes in my Obsidian vault have no incoming links (orphans):\n\n{}\n\nPlease review this list and suggest:\n1. Which notes could be linked from other relevant notes\n2. Which notes might be outdated and candidates for archiving\n3. How to better integrate these into the knowledge graph",
                 serde_json::to_string_pretty(&orphans).unwrap_or_default()
@@ -1150,7 +1140,6 @@ impl ServerHandler for ObsidianServer {
                 .enable_tools()
                 .enable_resources()
                 .enable_prompts()
-                .enable_logging()
                 .build(),
         )
         .with_server_info(Implementation::from_build_env())
@@ -1177,18 +1166,15 @@ impl ServerHandler for ObsidianServer {
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             resources: vec![
-                RawResource::new("vault://files", "Vault Files")
+                Resource::new("vault://files", "Vault Files")
                     .with_description("List of all files in the vault with paths")
-                    .with_mime_type("application/json")
-                    .no_annotation(),
-                RawResource::new("vault://folders", "Folder Structure")
+                    .with_mime_type("application/json"),
+                Resource::new("vault://folders", "Folder Structure")
                     .with_description("Folder hierarchy of the vault")
-                    .with_mime_type("application/json")
-                    .no_annotation(),
-                RawResource::new("vault://tags", "All Tags")
+                    .with_mime_type("application/json"),
+                Resource::new("vault://tags", "All Tags")
                     .with_description("All tags in the vault with usage counts")
-                    .with_mime_type("application/json")
-                    .no_annotation(),
+                    .with_mime_type("application/json"),
             ],
             next_cursor: None,
             meta: None,
@@ -1252,13 +1238,5 @@ impl ServerHandler for ObsidianServer {
             next_cursor: None,
             meta: None,
         })
-    }
-
-    async fn set_level(
-        &self,
-        _request: SetLevelRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<(), McpError> {
-        Ok(())
     }
 }
