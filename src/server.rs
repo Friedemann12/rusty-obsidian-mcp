@@ -1134,8 +1134,8 @@ impl ObsidianServer {
 #[tool_handler]
 #[prompt_handler]
 impl ServerHandler for ObsidianServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -1164,28 +1164,24 @@ impl ServerHandler for ObsidianServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult {
-            resources: vec![
-                Resource::new("vault://files", "Vault Files")
-                    .with_description("List of all files in the vault with paths")
-                    .with_mime_type("application/json"),
-                Resource::new("vault://folders", "Folder Structure")
-                    .with_description("Folder hierarchy of the vault")
-                    .with_mime_type("application/json"),
-                Resource::new("vault://tags", "All Tags")
-                    .with_description("All tags in the vault with usage counts")
-                    .with_mime_type("application/json"),
-            ],
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(vec![
+            Resource::new("vault://files", "Vault Files")
+                .with_description("List of all files in the vault with paths")
+                .with_mime_type("application/json"),
+            Resource::new("vault://folders", "Folder Structure")
+                .with_description("Folder hierarchy of the vault")
+                .with_mime_type("application/json"),
+            Resource::new("vault://tags", "All Tags")
+                .with_description("All tags in the vault with usage counts")
+                .with_mime_type("application/json"),
+        ]))
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri.as_str();
         match uri {
             "vault://files" => {
@@ -1197,7 +1193,8 @@ impl ServerHandler for ObsidianServer {
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                     &request.uri,
-                )]))
+                )])
+                .into())
             }
             "vault://folders" => {
                 let result = self
@@ -1208,7 +1205,8 @@ impl ServerHandler for ObsidianServer {
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                     &request.uri,
-                )]))
+                )])
+                .into())
             }
             "vault://tags" => {
                 let result = self
@@ -1219,7 +1217,8 @@ impl ServerHandler for ObsidianServer {
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                     &request.uri,
-                )]))
+                )])
+                .into())
             }
             _ => Err(McpError::resource_not_found(
                 "resource_not_found",
@@ -1233,10 +1232,6 @@ impl ServerHandler for ObsidianServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        Ok(ListResourceTemplatesResult {
-            resource_templates: Vec::new(),
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourceTemplatesResult::with_all_items(Vec::new()))
     }
 }
